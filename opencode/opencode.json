@@ -9,7 +9,8 @@
       },
       "models": {
         "qwen3.5:9b-opencode": {
-          "name": "Qwen 3.5 9B (local, tool-tuned)"
+          "name": "Qwen 3.5 9B (local, tool-tuned)",
+          "tools": true
         }
       }
     }

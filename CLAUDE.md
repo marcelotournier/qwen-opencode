@@ -47,16 +47,17 @@ Loads model into memory at boot so the first opencode call doesn't pay the 10–
 ```
 FROM qwen3.5:9b
 PARAMETER num_ctx 32768
-PARAMETER temperature 1
+PARAMETER temperature 0.7
 PARAMETER top_k 20
-PARAMETER top_p 0.95
+PARAMETER top_p 0.8
+PARAMETER min_p 0.0
 PARAMETER repeat_penalty 1.0
 PARAMETER presence_penalty 1.5
 ```
 
 Build: `ollama create qwen3.5:9b-opencode -f Modelfile`
 
-Sampling values are from the official ollama qwen3.5 model page. `num_ctx=32768` is the opencode-docs-recommended floor for reliable tool calling.
+Sampling values are unsloth's recommended **non-thinking-mode** set for Qwen 3.5 (temp 0.7 / top_p 0.8). The official ollama library page lists the *thinking-mode* defaults (temp 1 / top_p 0.95) — using those caused our requests to emit hundreds of internal `<think>` tokens and pushed simple completions into the 30–60 s range. `num_ctx=32768` is still the opencode-docs floor for reliable tool calling. Note: there is no `PARAMETER` for thinking mode itself — it's a per-request flag (`think: false` on `/api/chat`, or `chat_template_kwargs.enable_thinking=false` on `/v1/chat/completions`).
 
 ## Tool-calling correctness
 

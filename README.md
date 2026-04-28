@@ -32,7 +32,7 @@ Re-running it is safe — every step detects whether it's already done.
 
 A tmux session named `qwen-test` with three vertical panes:
 
-- **top** — live `log stream` filtered to the ollama process. Errors and request lines show up here in real time.
+- **top** — `tail -F` of `~/Library/Logs/ollama.log` and `ollama.err.log`. Request lines and runner state show up here in real time. (We don't use macOS `log stream` because the LaunchAgent redirects ollama's stdout/stderr to files via `StandardOutPath`, not via `os_log`.)
 - **middle** — `tests/api.sh` runs once and prints six PASS/FAIL lines. Test #5 is the interesting one: it forces a `read_file` tool call against the OpenAI-compat endpoint and asserts that ollama returned a structured `tool_calls[0]` (not plain text). That's the test that catches the pre-v0.19.0 bug where qwen tool calls were emitted as text.
 - **bottom** — `opencode` running with the local provider. The prompt *"Read prespec.md and tell me the model name it specifies"* is pre-typed; press Enter and watch a real read tool execute end-to-end.
 
@@ -78,7 +78,8 @@ Other devices on the home network reach the server at `http://m4mac.local:11434`
       },
       "models": {
         "qwen3.5:9b-opencode": {
-          "name": "Qwen 3.5 9B (m4mac, tool-tuned)"
+          "name": "Qwen 3.5 9B (m4mac, tool-tuned)",
+          "tools": true
         }
       }
     }
@@ -86,7 +87,40 @@ Other devices on the home network reach the server at `http://m4mac.local:11434`
 }
 ```
 
-That's all that differs from the M4-local config: the `baseURL` points to `m4mac.local` instead of `localhost`.
+That's all that differs from the M4-local config: the `baseURL` points to `m4mac.local` instead of `localhost`. Note `"tools": true` — without it, opencode's planning works but file edits silently no-op. Per the [kdnuggets opencode + ollama guide](https://www.kdnuggets.com/seeing-whats-possible-with-opencode-ollama-qwen3-coder), this is the most common opencode-with-local-ollama misconfiguration.
+
+## Curl examples
+
+The model has thinking mode on by default. Without disabling it, even a one-word answer can take 10–60 s on the M4 because the model emits hundreds of internal `<think>` tokens before the visible response. There are two paths to fast responses:
+
+```sh
+# /api/chat — native ollama endpoint, supports `think: false`
+curl -s http://m4mac.local:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3.5:9b-opencode",
+    "messages": [{"role":"user","content":"Say hi in one short sentence."}],
+    "think": false,
+    "stream": false
+  }' | python3 -m json.tool
+# ~0.5 s on the M4
+```
+
+If you're stuck with `/v1/chat/completions` (anything OpenAI-SDK-shaped, including opencode), there is no working thinking toggle on ollama 0.22 — verified against four candidate spellings:
+
+| What we tried on `/v1/chat/completions` | Result |
+| --- | --- |
+| `"chat_template_kwargs": {"enable_thinking": false}` | thinking on (485 tokens, 37 s) |
+| `"extra_body": {"chat_template_kwargs": {"enable_thinking": false}}` | timed out at 60 s |
+| `"enable_thinking": false` (top-level) | thinking on (779 tokens, 59 s) |
+| `"think": false` (top-level) | thinking on (609 tokens, 47 s) |
+
+ollama strips unknown fields at the OpenAI-compat layer. Per the qwen3.5 issue threads, fixing this requires an ollama change. Until then, use `/api/chat` from any caller you control.
+
+Notes:
+- The Qwen 3 `/think` and `/nothink` system-prompt directives **don't work** on Qwen 3.5 either — the directive is silently ignored and the model thinks anyway.
+- Modelfile `PARAMETER` doesn't include a thinking toggle — there is no way to bake "thinking off" into the model tag. It's a per-request flag.
+- This means **opencode (which uses `/v1/chat/completions`) will pay the thinking-tokens latency** until either ollama exposes the toggle on the compat layer or opencode adds a passthrough. We accept that trade for now.
 
 ## Uninstall
 
