@@ -117,7 +117,7 @@ The M4 has 16 GB unified memory. The server holds the model resident, so we cap 
 | `OLLAMA_NUM_PARALLEL` | `1` | predictable footprint |
 | `OLLAMA_FLASH_ATTENTION` | `1` | perf gain on Apple Silicon |
 
-Total resident with the model loaded is ~7–9 GB, leaving 7+ GB for macOS and other apps.
+Measured resident with the model fully loaded and 32K context allocated: **~9.7 GB** (Q4_K_M, all in unified memory). That leaves roughly 6 GB for macOS and other apps on the 16 GB M4 — workable, but not a lot of headroom. If you find yourself swapping, drop `num_ctx` to `16384` in `Modelfile` and rebuild.
 
 ## Troubleshooting
 
