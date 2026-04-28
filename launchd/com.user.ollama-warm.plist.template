@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.ollama-warm</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>for i in $(seq 1 120); do
+  if curl -fsS -m 5 -X POST http://127.0.0.1:11434/api/generate \
+       -H 'Content-Type: application/json' \
+       -d '{"model":"qwen3.5:9b-opencode","prompt":"hi","stream":false,"keep_alive":-1}' \
+       >/dev/null 2>&amp;1; then
+    echo "warmed after ${i}s"
+    exit 0
+  fi
+  sleep 2
+done
+echo "warmer gave up after 240s"
+exit 1</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/ollama-warm.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/ollama-warm.err.log</string>
+</dict>
+</plist>

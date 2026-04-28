@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.ollama</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BREW_PREFIX__/bin/ollama</string>
+        <string>serve</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>__BREW_PREFIX__/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>OLLAMA_HOST</key>
+        <string>0.0.0.0:11434</string>
+        <key>OLLAMA_KEEP_ALIVE</key>
+        <string>-1</string>
+        <key>OLLAMA_MAX_LOADED_MODELS</key>
+        <string>1</string>
+        <key>OLLAMA_NUM_PARALLEL</key>
+        <string>1</string>
+        <key>OLLAMA_FLASH_ATTENTION</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/ollama.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/ollama.err.log</string>
+</dict>
+</plist>
