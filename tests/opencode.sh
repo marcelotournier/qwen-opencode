@@ -21,4 +21,4 @@ tool invocation — that's the end-to-end proof of tool calling.
 EOF
 
 cd "$REPO_ROOT"
-exec opencode
+exec opencode -m ollama/qwen3.5:9b-opencode

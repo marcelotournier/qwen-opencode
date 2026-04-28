@@ -69,16 +69,19 @@ install_plist() {
     if [[ -f "$dst" ]] && cmp -s "$tmp" "$dst"; then
         rm -f "$tmp"
         skip "$name.plist unchanged"
+        # Already-loaded agents stay loaded; just make sure it IS loaded.
+        if ! launchctl list 2>/dev/null | grep -q "$name"; then
+            launchctl bootstrap "gui/$(id -u)" "$dst"
+            done_ "$name (re)loaded"
+        fi
     else
         mv "$tmp" "$dst"
         done_ "$name.plist written"
+        # Content changed — bounce the agent.
+        launchctl bootout "gui/$(id -u)/${name}" 2>/dev/null || true
+        launchctl bootstrap "gui/$(id -u)" "$dst"
+        done_ "$name loaded"
     fi
-
-    # Re-bootstrap so any change takes effect. bootout is allowed to fail
-    # (it errors when not loaded). bootstrap must succeed.
-    launchctl bootout "gui/$(id -u)/${name}" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$dst"
-    done_ "$name loaded"
 }
 
 wait_for_ollama() {

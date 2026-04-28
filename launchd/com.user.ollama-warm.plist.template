@@ -9,17 +9,23 @@
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>for i in $(seq 1 120); do
-  if curl -fsS -m 5 -X POST http://127.0.0.1:11434/api/generate \
-       -H 'Content-Type: application/json' \
-       -d '{"model":"qwen3.5:9b-opencode","prompt":"hi","stream":false,"keep_alive":-1}' \
-       >/dev/null 2>&amp;1; then
-    echo "warmed after ${i}s"
-    exit 0
+        <string>for i in $(seq 1 30); do
+  # Wait for the API to come up cheaply (no model load).
+  if curl -fsS -m 5 http://127.0.0.1:11434/api/version >/dev/null 2>&amp;1; then
+    break
   fi
   sleep 2
 done
-echo "warmer gave up after 240s"
+# Now do the actual warm. Model load can take 10-30s on cold start, so
+# allow up to 120s here rather than retrying short timeouts in a loop.
+if curl -fsS -m 120 -X POST http://127.0.0.1:11434/api/generate \
+     -H 'Content-Type: application/json' \
+     -d '{"model":"qwen3.5:9b-opencode","prompt":"hi","stream":false,"keep_alive":-1}' \
+     >/dev/null 2>&amp;1; then
+  echo "warmed"
+  exit 0
+fi
+echo "warmer failed"
 exit 1</string>
     </array>
 

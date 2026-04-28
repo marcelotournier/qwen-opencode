@@ -17,8 +17,11 @@ command -v opencode >/dev/null || { echo "opencode required: run ./install.sh fi
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
 # Window: start with log streamer in pane 0.
+# Top pane: tail the ollama log files. Note: macOS `log stream` doesn't show
+# ollama output because the LaunchAgent redirects stdout/stderr to files via
+# StandardOutPath, not via os_log.
 tmux new-session -d -s "$SESSION" -x 220 -y 60 \
-    "log stream --style compact --predicate 'process == \"ollama\"'"
+    "tail -F $HOME/Library/Logs/ollama.log $HOME/Library/Logs/ollama.err.log 2>/dev/null"
 
 # Split horizontally below pane 0 — pane 1 (middle) runs the API tests.
 tmux split-window -v -t "$SESSION:0.0" \
