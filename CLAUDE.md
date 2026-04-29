@@ -35,8 +35,9 @@ Tested quants (M2 8 GB):
 | Quant | Disk | Resident | GPU split | Decode | Notes |
 |---|---|---|---|---|---|
 | q4_K_M (vanilla) | 6.6 GB | 9.5 GB | 52% Metal / 48% CPU | **0.1 tok/s** | Doesn't fit, swap-thrashes |
-| Q3_K_S (GGUF) | 4.3 GB | 6.3 GB | 80% Metal / 20% CPU | **~10 tok/s** | Default for 8 GB hosts |
-| UD-IQ2_M (untested) | 3.65 GB | ~5 GB est. | likely 100% Metal | — | For 4 GB hosts |
+| Q3_K_S (GGUF) @ 16k | 4.3 GB | 6.3 GB | 80% Metal / 20% CPU | ~10 tok/s | Memory fits, **but opencode prompt now saturates 16k** — see "opencode rules envelope" |
+| Q3_K_S (GGUF) @ 32k | 4.3 GB | 7.0 GB | ~90% Metal | **~9 tok/s** | **Default for 8 GB hosts.** Tight (5.7 GB wired, swap up to ~2 GB) but tool-calling works |
+| UD-IQ2_M (GGUF) @ 32k | 3.65 GB | 6.2 GB | 100% Metal | ~8.5 tok/s | **Tool-calling broken** — model emits the command/path as text. 0/2 in opencode (2026-04-29). Memory fits, intelligence does not. |
 
 `setup-gguf.sh` accepts any quant tag from the unsloth repo (Q2_K, Q3_K_M, Q4_K_S, IQ4_XS, UD-Q3_K_XL, …); swap and switch with `MODEL_TAG=...`.
 
@@ -45,11 +46,13 @@ Tested quants (M2 8 GB):
 The "always loaded" requirement is in tension with 16 GB total RAM. Resolution:
 
 - `OLLAMA_KEEP_ALIVE=-1` — never unload the model.
-- `num_ctx=16384` — current setting. See "Context window tradeoffs" below for why.
+- `num_ctx=32768` — current setting (both `Modelfile` and `Modelfile.gguf.template`). Bumped from 16384 on 2026-04-29 because opencode's system prompt + tool defs grew past 16k and the smaller cap now saturates with `tokens.input=16384, output=2`. See "opencode rules envelope" below.
 - `OLLAMA_MAX_LOADED_MODELS=1`, `OLLAMA_NUM_PARALLEL=1` — keep memory footprint predictable.
 - `OLLAMA_FLASH_ATTENTION=1` — perf gain on Apple Silicon.
 
-Measured resident with `num_ctx=16384`: **9.07 GB unified memory**, runner reports total of 8.4 GiB (5.6 GiB Metal weights + 1.7 GiB KV + 0.5 GiB CPU weights + ~0.6 GiB compute graph). Leaves ~6.5 GB for macOS and other apps. With `num_ctx=32768`: 9.74 GB resident, ~5.8 GB free, *and* the system was sitting at 3 GB swap used under normal browser/app load.
+Measured resident on M4 16 GB with `num_ctx=16384`: 9.07 GB (5.6 GiB Metal weights + 1.7 GiB KV + 0.5 GiB CPU weights + ~0.6 GiB compute graph). With `num_ctx=32768`: ~9.74 GB resident.
+
+Measured resident on **M2 8 GB** with Q3_K_S @ `num_ctx=32768` (2026-04-29): 7.0 GB total / 5.13 GB Metal / 5.7 GB wired. Swap pressure climbs to ~1.5 GB at warmup and ~2.2 GB during opencode tool tests. macOS dynamically grew the swap file from 2 GB to 3 GB during testing (persists until reboot). The box stayed responsive.
 
 ## Context window tradeoffs
 
@@ -58,13 +61,13 @@ Measured resident with `num_ctx=16384`: **9.07 GB unified memory**, runner repor
 | `num_ctx` | KV cache | Runner total | Free RAM after model | Recommendation |
 |---|---|---|---|---|
 | 8192 | ~0.85 GiB | ~7.55 GiB | ~7.6 GB | Below opencode-recommended floor; tool calls degrade |
-| 16384 | ~1.7 GiB | ~8.4 GiB | ~6.5 GB | **Current.** Floor for reliable opencode tool calling |
-| 32768 | ~2.2 GiB | ~9.1 GiB | ~5.8 GB | Better for long files / multi-step refactors. Pushes 16 GB M4 into swap |
+| 16384 | ~1.7 GiB | ~8.4 GiB | ~6.5 GB | **Broken for opencode** as of late 2026 — prompt saturates, output=2 tokens |
+| 32768 | ~2.2 GiB | ~9.1 GiB | ~5.8 GB | **Current.** Floor for reliable opencode tool calling |
 | 65536+ | 4+ GiB | 11+ GiB | <4 GB | Don't on 16 GB. Forces severe swap |
 
-**Decision rule for the 16 GB M4: always pick 16384 or 32768. Never go above 32768 — KV cache scales linearly with context and the math stops working.** 8192 is below opencode's documented floor for reliable tool-calling and we've never tested it; treat as risky.
+**Decision rule (2026-04-29 update): pick 32768.** 16384 used to be the floor; opencode's prompt grew past it. Verified empirically: Q3_K_S @ 16k in `opencode run --format json` → `tokens.input=16384, output=2`, model emits nothing useful. 32k is the new floor for opencode tool-calling regardless of host size. Above 32768 the math stops working on 16 GB.
 
-When to switch to 32768: if you're doing genuinely long single-context work (reading a 5+ file refactor in one go, or processing a long document) AND you can quit other apps to free 1+ GB. Re-render the Modelfile, `ollama create`, force-evict the resident copy via `keep_alive:0`, and re-warm.
+On 8 GB hosts, 32768 + a slim quant (Q3_K_S, 4.3 GB on disk) fits but is tight: 5.7 GB wired, swap creeps to ~2 GB and macOS may grow the swap file from 2 GB to 3 GB under tool-test load. Acceptable but at the edge.
 
 ## Quantization investigation (2026-04-29)
 
@@ -130,6 +133,7 @@ Homebrew throughout (already installed on the M4):
 qwen-opencode/
 ├── CLAUDE.md                                # this file
 ├── README.md                                # user-facing docs
+├── AGENTS.md                                # opencode tool-use rules (auto-loaded by opencode)
 ├── prespec.md                               # original prespec (do not modify)
 ├── install.sh                               # single idempotent installer
 │                                            #   honours $MODEL_TAG (default qwen3.5:9b-opencode)
@@ -167,6 +171,33 @@ Plists are templates with placeholders (`__USER__`, `__HOME__`, `__BREW_PREFIX__
 3. **Bottom — opencode** (interactive): `OPENCODE_CONFIG=./opencode/opencode.json opencode` launched with the prompt **"Read prespec.md and tell me the model name it specifies"** pre-typed. User presses Enter, observes the read tool execute end-to-end.
 
 The opencode test is intentionally interactive — tool-call failure modes are subtle (model claims to have called a tool but didn't), and human-in-the-loop observation catches what an automated assertion misses.
+
+## opencode rules envelope (`AGENTS.md`)
+
+opencode prepends a project-level rules file to every request. Lookup order:
+
+1. `AGENTS.md` in the repo root
+2. `~/.config/opencode/AGENTS.md` (global)
+3. `CLAUDE.md` in the repo root (silent fallback — **footgun**)
+
+**The CLAUDE.md fallback is a footgun.** Without `AGENTS.md`, opencode silently picks up CLAUDE.md and stuffs ~6 k tokens of design notes into every turn's prompt. Verified 2026-04-29: opencode's input dropped from 17,085 → 11,206 tokens just by adding a 600-token `AGENTS.md`. On a local model running ~8–10 tok/s, that's ~40 s of prefill saved per request.
+
+`AGENTS.md` in this repo carries minimal tool-use discipline (imperative "use the bash/read tool, don't echo or hallucinate" + three short examples). Cheap to write, expensive to omit.
+
+### Tool-calling reliability findings (2026-04-29 testing)
+
+Tested Q3_K_S @ `num_ctx=32768` in `opencode run --format json`:
+
+| Test | Without `AGENTS.md` | With `AGENTS.md` |
+|---|---|---|
+| `read` tool — read prespec.md | ✅ tool fired, correct answer | ✅ (already worked) |
+| `bash` tool — `pwd` | ❌ output `pwd` (echoed cmd literal) | ✅ tool fired, correct path |
+| `bash` tool — `wc -l tests/api.sh` | (not run) | ✅ tool fired, output `147` |
+| `bash` tool — `git log --oneline -5` | ❌ output `b8c8d2f` (fake hash) | ⚠️ output `ec1dbe3` (real hash, no tool) |
+
+The `git log` case is special: opencode auto-injects git status into every request, so the model has the answer in context and skips the tool. With `AGENTS.md` it produces the *correct* hash; without, it hallucinates. Acceptable behaviour, not a bug.
+
+UD-IQ2_M was tested first and **failed across the board** — 0/2 tool calls, both prompts produced fake-looking text. The 2-bit quant is too lossy for opencode's tool envelope. Stay on Q3_K_S for 8 GB hosts.
 
 ## opencode config
 
@@ -317,7 +348,9 @@ If we decide NOT to ship it: delete `proxy/` and remove this section.
 ## Open issues / known limitations
 
 - **opencode duplicate requests**: documented above. ~2× cost, not fixable in proxy.
-- **opencode `--format json` buffers until exit**: do not use for headless benchmarking; the file stays 0 bytes for many minutes. Use the tmux + send-keys + capture-pane pattern from `/tmp/oc_tmux_bench.sh` (lost — recreate if needed).
+- **opencode `--format json` buffers until exit**: 0-bytes for the entire run, then the full NDJSON stream lands when the process exits. Usable for headless benchmarking if you wait for exit (cleaner than tmux send-keys + capture-pane). Harness at `/tmp/qwen-bench/run_oc_json.sh` from the 2026-04-29 tool-call testing — recreate from CLAUDE.md if needed.
+- **opencode prompt size has grown past 16k tokens.** As of 2026-04-29 opencode sends 11.2 k (with `AGENTS.md`) to 17.1 k (CLAUDE.md fallback) input tokens per turn. Anything below `num_ctx=32768` saturates and emits 0–2 output tokens. The CLAUDE.md docs that previously called 16384 the "floor for reliable tool calling" are wrong now — see "Context window tradeoffs" above.
+- **macOS swap file dynamic growth.** Q3_K_S @ 32k on 8 GB grew the swap file from 2 GB → 3 GB during opencode tool tests. Persists until reboot. Not harmful — just unexpected if you're tracking memory headroom.
 - **macOS `log stream` does not show ollama output** because the LaunchAgent uses `StandardOutPath`/`StandardErrorPath` (file redirection, not `os_log`). `test.sh` uses `tail -F` on the log files instead.
 - **`launchctl bootstrap` returns Bootstrap: 5 EIO** if the agent is already loaded. install.sh now only bootstraps when the plist content actually changed; otherwise it just verifies the agent is loaded.
 - **Proxy mangles `/api/pull` responses**: confirmed 2026-04-29 with `ollama pull qwen3.5:9b-q4_K_S` failing through the proxy with `malformed HTTP response "0"`. The pull endpoint streams NDJSON (newline-delimited JSON), not SSE — our chunked-passthrough breaks the framing somehow. **Workaround: pull through the upstream directly with `OLLAMA_HOST=127.0.0.1:11435 ollama pull <tag>`.** Fix would be either (a) detect `/api/pull` and `/api/push` and stream raw without re-chunking, or (b) buffer the entire response. (a) is correct, (b) defeats progress reporting.

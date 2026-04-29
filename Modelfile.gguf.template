@@ -18,7 +18,7 @@ PARSER qwen3.5
 
 # Project tuning — Unsloth's non-thinking-mode sampling defaults.
 # Mirrors Modelfile (the official-base variant).
-PARAMETER num_ctx 16384
+PARAMETER num_ctx 32768
 PARAMETER temperature 0.7
 PARAMETER top_k 20
 PARAMETER top_p 0.8

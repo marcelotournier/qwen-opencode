@@ -6,8 +6,8 @@ Always-on local ollama server hosting `qwen3.5:9b-opencode` on `m4mac.local`, re
 
 - A tuned Qwen 3.5 9B model registered with ollama (vanilla `qwen3.5:9b-opencode`, or a slimmer Unsloth GGUF like `qwen3.5:9b-q3_k_s` — pick a path below).
 - ollama listening on `127.0.0.1:11435` (loopback only) and a stdlib-python think-suppression proxy on `0.0.0.0:11434` (LAN-reachable). Both are LaunchAgents — they survive reboot, sleep, and crash, and the warmer pre-loads the model into memory at boot so the first request doesn't pay the 10–30 s cold start.
-- Capped `num_ctx=16384` and `OLLAMA_KEEP_ALIVE=-1` — model stays pinned, KV cache stays predictable, no surprise swap.
-- An `opencode/opencode.json` listing both model variants so opencode can pick whichever is registered.
+- `num_ctx=32768` and `OLLAMA_KEEP_ALIVE=-1` — model stays pinned, KV cache stays predictable. (16k used to be the default but opencode's prompt grew past it in late 2026 — see "Memory budget" for context.)
+- An `opencode/opencode.json` listing both model variants so opencode can pick whichever is registered, plus an `AGENTS.md` of tool-use rules that opencode auto-loads.
 - A 3-pane tmux test harness (`./test.sh`) that streams logs, runs 6 API smoke checks, and drops into opencode for an interactive tool-call test.
 
 ### Two endpoints
@@ -51,7 +51,9 @@ MODEL_TAG=qwen3.5:9b-q3_k_s ./install.sh          # wire it into the LaunchAgent
 
 `setup-gguf.sh` pulls the requested quant from `unsloth/Qwen3.5-9B-GGUF` on Hugging Face (any tag from `Q2_K` through `Q8_0` plus the `UD-` Unsloth Dynamic 2.0 variants — `Q3_K_S` ≈ 4.3 GB, `UD-IQ2_M` ≈ 3.65 GB) and registers it as `qwen3.5:9b-<quant lowercased>`. The Modelfile template captures the `RENDERER qwen3.5` / `PARSER qwen3.5` directives copied verbatim from the official ollama Modelfile — without those, the GGUF emits `<|im_start|>` / `<|endoftext|>` as visible text.
 
-Measured on M2 8 GB with `Q3_K_S`: 6.3 GB resident (80% Metal), ~10 tok/s decode with `think:false` through the proxy.
+Measured on M2 8 GB with `Q3_K_S` @ `num_ctx=32768`: 7.0 GB resident (5.13 GB Metal, 5.7 GB wired), ~9 tok/s sustained decode with `think:false` through the proxy. Swap pressure runs ~1.5–2.2 GB; macOS may grow the swap file from 2 GB to 3 GB during tool tests (persists until reboot).
+
+`UD-IQ2_M` was evaluated for tool calling on 2026-04-29 and **rejected**: the 2-bit quant fits memory comfortably (3.65 GB on disk, ~5.07 GB Metal) but cannot reliably invoke opencode's tools — it emits the command/path as text instead. Stay on `Q3_K_S` for 8 GB hosts. See `CLAUDE.md` for the full comparison.
 
 Switching paths later is just `MODEL_TAG=… ./install.sh` — the warmer plist is regenerated with the new tag and the agent re-bootstraps.
 
@@ -73,6 +75,7 @@ A tmux session named `qwen-test` with three vertical panes:
 qwen-opencode/
 ├── CLAUDE.md                                # design notes for future-me / agents
 ├── README.md                                # this file
+├── AGENTS.md                                # opencode tool-use rules (auto-loaded by opencode)
 ├── prespec.md                               # original prespec
 ├── install.sh                               # idempotent installer (honours $MODEL_TAG)
 ├── setup-gguf.sh                            # one-shot GGUF download + register
@@ -258,7 +261,7 @@ The M4 has 16 GB unified memory. The server holds the model resident, so we cap 
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| `num_ctx` | `16384` | opencode-recommended floor for reliable tool calls. See trade-offs below |
+| `num_ctx` | `32768` | floor for reliable opencode tool calls (bumped from 16384 on 2026-04-29 — opencode's prompt grew past 16k). See trade-offs below |
 | `OLLAMA_KEEP_ALIVE` | `-1` | never unload — defeats ollama's memory-saving auto-eviction |
 | `OLLAMA_MAX_LOADED_MODELS` | `1` | predictable footprint |
 | `OLLAMA_NUM_PARALLEL` | `1` | predictable footprint |
@@ -271,11 +274,11 @@ The M4 has 16 GB unified memory. The server holds the model resident, so we cap 
 | `num_ctx` | KV cache | Total resident | Free RAM after model | Verdict |
 |---|---|---|---|---|
 | `8192` | ~0.85 GiB | ~7.6 GiB | ~7.6 GB | **Avoid** — below opencode's tool-calling floor |
-| `16384` | ~1.7 GiB | **~8.4 GiB** | **~6.5 GB** | **Default.** Floor for reliable opencode tool calls |
-| `32768` | ~2.2 GiB | ~9.1 GiB | ~5.8 GB | OK if you're doing long-context work and quit other apps |
+| `16384` | ~1.7 GiB | **~8.4 GiB** | **~6.5 GB** | **Broken for opencode** — prompt saturates at input=16384, output=2 |
+| `32768` | ~2.2 GiB | ~9.1 GiB | ~5.8 GB | **Default.** Floor for reliable opencode tool calls (verified 2026-04-29) |
 | `65536+` | 4+ GiB | 11+ GiB | <4 GB | **Don't.** Forces severe swap on 16 GB |
 
-**Decision rule for the 16 GB M4: pick `16384` or `32768`. Never higher.** Both numbers fit; anything bigger pushes the system into swap under normal browser/app load.
+**Decision rule: pick `32768`.** 16384 used to be the floor; opencode's prompt grew past it. Above 32768 the math stops working on 16 GB.
 
 To switch to 32K (more headroom for opencode multi-file work, less headroom for everything else): edit `Modelfile`, set `PARAMETER num_ctx 32768`, then:
 

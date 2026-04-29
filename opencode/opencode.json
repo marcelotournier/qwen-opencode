@@ -15,6 +15,10 @@
         "qwen3.5:9b-q3_k_s": {
           "name": "Qwen 3.5 9B Q3_K_S (local, GGUF path — fits 8 GB)",
           "tools": true
+        },
+        "qwen3.5:9b-ud-iq2_m": {
+          "name": "Qwen 3.5 9B UD-IQ2_M (local, GGUF path — fits 8 GB w/ 32k ctx)",
+          "tools": true
         }
       }
     }
