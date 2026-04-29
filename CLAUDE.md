@@ -9,7 +9,38 @@ Always-on local ollama server hosting `qwen3.5:9b` for opencode and other LAN cl
 - **Server binding**: `OLLAMA_HOST=0.0.0.0:11434`. No auth — trusted home LAN. Reachable from other LAN devices via Bonjour at `m4mac.local:11434`.
 - **opencode**: installed on the M4 only, used for the tmux smoke test. Other LAN clients install opencode manually later.
 
-## Memory budget (16 GB M4 — not negotiable)
+## Implementation paths
+
+Two ways to get the tuned model into ollama. Both terminate in a `MODEL_TAG` that the LaunchAgent warmer pins and that opencode points at; the LaunchAgent + proxy stack is identical.
+
+### Vanilla (default — 16 GB+ hosts)
+
+```sh
+./install.sh                 # uses MODEL_TAG=qwen3.5:9b-opencode
+```
+
+Pulls `qwen3.5:9b` (6.6 GB, q4_K_M) from ollama's library, builds `qwen3.5:9b-opencode` via `Modelfile`. ~9.5 GB resident on a 16 GB M4 with 100% Metal residency.
+
+### Custom GGUF (smaller hosts, or anyone wanting a different quant)
+
+```sh
+./setup-gguf.sh Q3_K_S                            # one-time: register GGUF
+MODEL_TAG=qwen3.5:9b-q3_k_s ./install.sh          # wire it into the stack
+```
+
+`setup-gguf.sh` downloads a GGUF from `unsloth/Qwen3.5-9B-GGUF` on Hugging Face and registers it as `qwen3.5:9b-<quant lowercased>`. The Modelfile is rendered from `Modelfile.gguf.template`, which captures the upstream `RENDERER qwen3.5` / `PARSER qwen3.5` directives — ollama's built-in qwen3.5 chat/stop/tool handlers. **Without those two lines the GGUF runs against ollama's generic renderer and the model emits raw `<|im_start|>` / `<|endoftext|>` control tokens as text.** Captured here so we never need to re-pull the 6.6 GB base just to read its Modelfile.
+
+Tested quants (M2 8 GB):
+
+| Quant | Disk | Resident | GPU split | Decode | Notes |
+|---|---|---|---|---|---|
+| q4_K_M (vanilla) | 6.6 GB | 9.5 GB | 52% Metal / 48% CPU | **0.1 tok/s** | Doesn't fit, swap-thrashes |
+| Q3_K_S (GGUF) | 4.3 GB | 6.3 GB | 80% Metal / 20% CPU | **~10 tok/s** | Default for 8 GB hosts |
+| UD-IQ2_M (untested) | 3.65 GB | ~5 GB est. | likely 100% Metal | — | For 4 GB hosts |
+
+`setup-gguf.sh` accepts any quant tag from the unsloth repo (Q2_K, Q3_K_M, Q4_K_S, IQ4_XS, UD-Q3_K_XL, …); swap and switch with `MODEL_TAG=...`.
+
+## Memory budget (16 GB M4 — not negotiable for the vanilla path)
 
 The "always loaded" requirement is in tension with 16 GB total RAM. Resolution:
 
@@ -39,7 +70,7 @@ When to switch to 32768: if you're doing genuinely long single-context work (rea
 
 Investigated `qwen3.5:9b-q4_K_S` (smaller than current `q4_K_M`, ~6 GB instead of 6.6 GB). **Not available on ollama's library** — verified via `ollama pull qwen3.5:9b-q4_K_S` returning `Error: pull model manifest: file does not exist`. Library only ships `q4_K_M` (smallest), `q8_0`, `bf16`, `mlx-bf16`, `nvfp4`, `mxfp8` — all the alternatives are *bigger*.
 
-Going below `q4_K_M` requires pulling a GGUF from Hugging Face (e.g. unsloth's q3 or q2 variants), which counts as switching the model — out of scope per project constraints. Staying on `q4_K_M`.
+**Update (later same day, after first run on the M2 8 GB box):** the slim quants do exist on Hugging Face at `unsloth/Qwen3.5-9B-GGUF` — Q3_K_S (4.32 GB), Q3_K_M (4.67 GB), UD-IQ2_M (3.65 GB), UD-IQ2_XXS (3.19 GB), Q2_K (varies). Pulling one of those and registering it via `ollama create FROM ./file.gguf` works, **but you must add `RENDERER qwen3.5` and `PARSER qwen3.5` to the Modelfile** or the model emits `<|im_start|>` / `<|endoftext|>` as text instead of treating them as control tokens. Verified by reading `ollama show --modelfile qwen3.5:9b` from a freshly pulled vanilla copy, then deleting the vanilla. The two directives + sampling tuning are now codified in `Modelfile.gguf.template`, automated by `setup-gguf.sh`. This brings smaller quants into scope for hosts where q4_K_M doesn't fit.
 
 ## Persistence
 
@@ -97,20 +128,26 @@ Homebrew throughout (already installed on the M4):
 
 ```
 qwen-opencode/
-├── CLAUDE.md                           # this file
-├── README.md                           # user-facing docs
-├── prespec.md                          # original prespec (do not modify)
-├── install.sh                          # single idempotent installer
-├── test.sh                             # opens tmux qwen-test session
-├── Modelfile
+├── CLAUDE.md                                # this file
+├── README.md                                # user-facing docs
+├── prespec.md                               # original prespec (do not modify)
+├── install.sh                               # single idempotent installer
+│                                            #   honours $MODEL_TAG (default qwen3.5:9b-opencode)
+├── setup-gguf.sh                            # downloads + registers an Unsloth GGUF
+├── test.sh                                  # opens tmux qwen-test session
+├── Modelfile                                # vanilla path: FROM qwen3.5:9b
+├── Modelfile.gguf.template                  # GGUF path: FROM __GGUF_PATH__ (rendered by setup-gguf.sh)
 ├── launchd/
-│   ├── com.user.ollama.plist.template
-│   └── com.user.ollama-warm.plist.template
+│   ├── com.user.ollama.plist.template       # ollama serve on 127.0.0.1:11435
+│   ├── com.user.ollama-proxy.plist.template # think:false shim on :11434
+│   └── com.user.ollama-warm.plist.template  # warms __MODEL_TAG__ at boot
 ├── opencode/
-│   └── opencode.json                   # provider=ollama, model=qwen3.5:9b-opencode
+│   └── opencode.json                        # both qwen3.5:9b-opencode and -q3_k_s listed
+├── proxy/
+│   └── ollama_proxy.py                      # stdlib python; see Proxy section
 └── tests/
-    ├── api.sh                          # 6 curl checks
-    └── opencode.sh                     # launches opencode w/ pre-filled prompt
+    ├── api.sh                               # 6 curl checks (uses $(hostname) for LAN test)
+    └── opencode.sh                          # launches opencode w/ pre-filled prompt
 ```
 
 Plists are templates with placeholders (`__USER__`, `__HOME__`, `__BREW_PREFIX__`); `install.sh` substitutes at install time.

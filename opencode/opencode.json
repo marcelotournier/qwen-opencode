@@ -9,7 +9,11 @@
       },
       "models": {
         "qwen3.5:9b-opencode": {
-          "name": "Qwen 3.5 9B (local, tool-tuned)",
+          "name": "Qwen 3.5 9B q4_K_M (local, vanilla path)",
+          "tools": true
+        },
+        "qwen3.5:9b-q3_k_s": {
+          "name": "Qwen 3.5 9B Q3_K_S (local, GGUF path — fits 8 GB)",
           "tools": true
         }
       }

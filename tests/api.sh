@@ -5,8 +5,9 @@
 set -u
 
 OLLAMA_LOCAL="http://127.0.0.1:11434"
-OLLAMA_LAN="http://m4mac.local:11434"
-MODEL="qwen3.5:9b-opencode"
+LAN_HOST="$(hostname)"
+OLLAMA_LAN="http://${LAN_HOST}:11434"
+MODEL="${MODEL:-qwen3.5:9b-opencode}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 pass=0
@@ -134,7 +135,7 @@ check "2. /api/tags lists $MODEL"                             t2_tags
 check "3. POST /api/generate (native) returns non-empty"      t3_generate_native
 check "4. POST /v1/chat/completions returns non-empty"        t4_chat_openai_compat
 check "5. Tool call: read_file invoked with parseable args"   t5_tool_call
-check "6. LAN: m4mac.local:11434/api/version returns 200"     t6_lan_reachable
+check "6. LAN: ${LAN_HOST}:11434/api/version returns 200"     t6_lan_reachable
 
 echo
 if [[ $fail -eq 0 ]]; then

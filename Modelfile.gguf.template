@@ -1,0 +1,27 @@
+# Modelfile template for an Unsloth GGUF variant of Qwen3.5 9B.
+# Rendered by setup-gguf.sh — substitutes __GGUF_PATH__ at build time.
+#
+# RENDERER/PARSER are the critical lines: copied verbatim from the
+# official ollama qwen3.5:9b Modelfile (`ollama show --modelfile
+# qwen3.5:9b`). They tell ollama to use its built-in qwen3.5 chat
+# handlers — im_start/im_end stop tokens, tool-call parsing, thinking
+# blocks. Without them, the GGUF runs against ollama's generic
+# renderer and the model emits raw <|im_start|>/<|endoftext|>
+# control tokens as text. Captured here so we don't need to re-pull
+# the 6.6 GB qwen3.5:9b just to read its Modelfile.
+
+FROM __GGUF_PATH__
+
+TEMPLATE {{ .Prompt }}
+RENDERER qwen3.5
+PARSER qwen3.5
+
+# Project tuning — Unsloth's non-thinking-mode sampling defaults.
+# Mirrors Modelfile (the official-base variant).
+PARAMETER num_ctx 16384
+PARAMETER temperature 0.7
+PARAMETER top_k 20
+PARAMETER top_p 0.8
+PARAMETER min_p 0.0
+PARAMETER repeat_penalty 1.0
+PARAMETER presence_penalty 1.5

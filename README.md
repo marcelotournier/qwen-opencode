@@ -4,29 +4,58 @@ Always-on local ollama server hosting `qwen3.5:9b-opencode` on `m4mac.local`, re
 
 ## What you get
 
-- `qwen3.5:9b` (6.6 GB, 256K-capable) re-tagged as `qwen3.5:9b-opencode` with sampling params baked in via `Modelfile`.
-- ollama bound to `0.0.0.0:11434`, so any device on the LAN can call it via `m4mac.local:11434`.
-- Two LaunchAgents: one keeps the ollama server running across reboot/sleep/crash, the other pre-warms the model into memory at boot so the first request doesn't pay a 10–30 s cold start.
-- Capped `num_ctx=16384` and `OLLAMA_KEEP_ALIVE=-1` so the model stays resident in ~9 GB without thrashing macOS swap on the 16 GB M4.
-- An `opencode/opencode.json` that points opencode at the local model out of the box.
+- A tuned Qwen 3.5 9B model registered with ollama (vanilla `qwen3.5:9b-opencode`, or a slimmer Unsloth GGUF like `qwen3.5:9b-q3_k_s` — pick a path below).
+- ollama listening on `127.0.0.1:11435` (loopback only) and a stdlib-python think-suppression proxy on `0.0.0.0:11434` (LAN-reachable). Both are LaunchAgents — they survive reboot, sleep, and crash, and the warmer pre-loads the model into memory at boot so the first request doesn't pay the 10–30 s cold start.
+- Capped `num_ctx=16384` and `OLLAMA_KEEP_ALIVE=-1` — model stays pinned, KV cache stays predictable, no surprise swap.
+- An `opencode/opencode.json` listing both model variants so opencode can pick whichever is registered.
 - A 3-pane tmux test harness (`./test.sh`) that streams logs, runs 6 API smoke checks, and drops into opencode for an interactive tool-call test.
 
-## Quick start (M4 host only)
+### Two endpoints
+
+| Port | Bound to | Who calls it | What it does |
+|---|---|---|---|
+| `11434` | `0.0.0.0` (LAN) | opencode, your `curl`, any LAN client | Front door. Translates `/v1/chat/completions` to `/api/chat` with `think:false`, fake-streams via SSE keepalives, converts tool-call argument formats. Passes everything else straight through. |
+| `11435` | `127.0.0.1` only | the proxy, the warmer, `ollama` CLI | Real ollama. You only hit this directly when you want to bypass the think-suppression (rare) or to run `ollama pull` (the proxy mishandles `/api/pull` NDJSON). |
+
+## Two install paths
+
+The same LaunchAgent + proxy stack runs both. They differ only in which model gets registered with ollama.
+
+### Vanilla — for 16 GB+ hosts (the original M4 use case)
 
 ```sh
 ./install.sh   # idempotent — safe to re-run
-./test.sh      # tmux session "qwen-test" with logs + smoke + opencode
+./test.sh
 ```
 
-`./install.sh` will:
+`install.sh` will:
 1. `brew install ollama` (skip if present)
 2. `brew install anomalyco/tap/opencode` (skip if present)
 3. Stop any competing ollama instance (Ollama.app or `brew services start ollama`)
-4. Install the server LaunchAgent and bootstrap it
-5. Wait for the API to come up, pull `qwen3.5:9b`, build `qwen3.5:9b-opencode` from the Modelfile
-6. Install the warmer LaunchAgent (last, so it never warms a missing model)
+4. Install the server LaunchAgent (ollama on `127.0.0.1:11435`)
+5. Wait for the API to come up, pull `qwen3.5:9b`, build `qwen3.5:9b-opencode` from `Modelfile`
+6. Install the proxy LaunchAgent (think:false shim on `:11434` — see "Proxy" section)
+7. Install the warmer LaunchAgent (last, so it never warms a missing model)
 
-Re-running it is safe — every step detects whether it's already done.
+Loads at ~9.5 GB resident, all-Metal — comfortable on 16 GB.
+
+### Custom GGUF — for smaller hosts (e.g. 8 GB M2)
+
+q4_K_M doesn't fit in 8 GB; weights split half-CPU and the model swap-thrashes (~0.1 tok/s, unusable). Workaround: register a slimmer Unsloth GGUF, then point the installer at it.
+
+```sh
+./setup-gguf.sh Q3_K_S                            # download + register one-shot
+MODEL_TAG=qwen3.5:9b-q3_k_s ./install.sh          # wire it into the LaunchAgents
+./test.sh
+```
+
+`setup-gguf.sh` pulls the requested quant from `unsloth/Qwen3.5-9B-GGUF` on Hugging Face (any tag from `Q2_K` through `Q8_0` plus the `UD-` Unsloth Dynamic 2.0 variants — `Q3_K_S` ≈ 4.3 GB, `UD-IQ2_M` ≈ 3.65 GB) and registers it as `qwen3.5:9b-<quant lowercased>`. The Modelfile template captures the `RENDERER qwen3.5` / `PARSER qwen3.5` directives copied verbatim from the official ollama Modelfile — without those, the GGUF emits `<|im_start|>` / `<|endoftext|>` as visible text.
+
+Measured on M2 8 GB with `Q3_K_S`: 6.3 GB resident (80% Metal), ~10 tok/s decode with `think:false` through the proxy.
+
+Switching paths later is just `MODEL_TAG=… ./install.sh` — the warmer plist is regenerated with the new tag and the agent re-bootstraps.
+
+Re-running either flow is safe — every step detects whether it's already done.
 
 ## What `./test.sh` shows
 
@@ -42,20 +71,25 @@ A tmux session named `qwen-test` with three vertical panes:
 
 ```
 qwen-opencode/
-├── CLAUDE.md                           # design notes for future-me / agents
-├── README.md                           # this file
-├── prespec.md                          # original prespec
-├── install.sh                          # idempotent installer
-├── test.sh                             # opens tmux qwen-test session
-├── Modelfile                           # qwen3.5:9b-opencode definition
+├── CLAUDE.md                                # design notes for future-me / agents
+├── README.md                                # this file
+├── prespec.md                               # original prespec
+├── install.sh                               # idempotent installer (honours $MODEL_TAG)
+├── setup-gguf.sh                            # one-shot GGUF download + register
+├── test.sh                                  # opens tmux qwen-test session
+├── Modelfile                                # vanilla path: FROM qwen3.5:9b
+├── Modelfile.gguf.template                  # GGUF path: FROM __GGUF_PATH__
 ├── launchd/
-│   ├── com.user.ollama.plist.template       # ollama server agent
-│   └── com.user.ollama-warm.plist.template  # boot-time warmer
+│   ├── com.user.ollama.plist.template       # ollama server (127.0.0.1:11435)
+│   ├── com.user.ollama-proxy.plist.template # think:false proxy (:11434)
+│   └── com.user.ollama-warm.plist.template  # boot-time warmer (warms $MODEL_TAG)
 ├── opencode/
-│   └── opencode.json                   # opencode → local ollama provider
+│   └── opencode.json                        # both vanilla and Q3_K_S models listed
+├── proxy/
+│   └── ollama_proxy.py                      # stdlib python think:false shim
 └── tests/
-    ├── api.sh                          # 6 curl checks (run inside tmux)
-    └── opencode.sh                     # launches opencode w/ pre-typed prompt
+    ├── api.sh                               # 6 curl checks (uses $(hostname) for LAN test)
+    └── opencode.sh                          # launches opencode w/ pre-typed prompt
 ```
 
 ## LAN clients
@@ -91,43 +125,122 @@ That's all that differs from the M4-local config: the `baseURL` points to `m4mac
 
 ## Curl examples
 
-The model has thinking mode on by default. Without disabling it, even a one-word answer can take 10–60 s on the M4 because the model emits hundreds of internal `<think>` tokens before the visible response. There are two paths to fast responses:
+All examples assume you ran one of the install paths above. Replace `qwen3.5:9b-q3_k_s` with `qwen3.5:9b-opencode` if you're on the vanilla path. From a LAN device, replace `127.0.0.1` with the host's mDNS name (e.g. `m1mac.local`).
+
+### OpenAI-compatible (what opencode and most SDKs hit)
+
+The proxy on `:11434` translates this to `/api/chat` with `think:false` automatically — no thinking tokens, fast responses on a freshly-loaded model.
 
 ```sh
-# /api/chat — native ollama endpoint, supports `think: false`
-curl -s http://m4mac.local:11434/api/chat \
+curl -s http://127.0.0.1:11434/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
-    "model": "qwen3.5:9b-opencode",
-    "messages": [{"role":"user","content":"Say hi in one short sentence."}],
-    "think": false,
-    "stream": false
+    "model":"qwen3.5:9b-q3_k_s",
+    "messages":[{"role":"user","content":"Say hi in one sentence."}],
+    "stream":false
   }' | python3 -m json.tool
-# ~0.5 s on the M4
 ```
 
-If you're stuck with `/v1/chat/completions` (anything OpenAI-SDK-shaped, including opencode), there is no working thinking toggle on ollama 0.22 — verified against four candidate spellings:
+### Native ollama `/api/chat` (full control)
 
-| What we tried on `/v1/chat/completions` | Result |
-| --- | --- |
-| `"chat_template_kwargs": {"enable_thinking": false}` | thinking on (485 tokens, 37 s) |
-| `"extra_body": {"chat_template_kwargs": {"enable_thinking": false}}` | timed out at 60 s |
-| `"enable_thinking": false` (top-level) | thinking on (779 tokens, 59 s) |
-| `"think": false` (top-level) | thinking on (609 tokens, 47 s) |
+`think:false` is the explicit knob. Equivalent to the proxied call above; useful when you want to test what the proxy is doing or experiment with `think:true`.
 
-ollama strips unknown fields at the OpenAI-compat layer. Per the qwen3.5 issue threads, fixing this requires an ollama change. Until then, use `/api/chat` from any caller you control.
+```sh
+curl -s http://127.0.0.1:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"qwen3.5:9b-q3_k_s",
+    "messages":[{"role":"user","content":"Say hi in one sentence."}],
+    "think":false,
+    "stream":false
+  }' | python3 -m json.tool
+```
 
-Notes:
-- The Qwen 3 `/think` and `/nothink` system-prompt directives **don't work** on Qwen 3.5 either — the directive is silently ignored and the model thinks anyway.
-- Modelfile `PARAMETER` doesn't include a thinking toggle — there is no way to bake "thinking off" into the model tag. It's a per-request flag.
-- This means **opencode (which uses `/v1/chat/completions`) will pay the thinking-tokens latency** until either ollama exposes the toggle on the compat layer or opencode adds a passthrough. We accept that trade for now.
+### Streaming
+
+The proxy fake-streams `/v1/chat/completions`: it sends SSE `: keepalive` comments every 1 s while ollama generates, then dumps the full response as one `delta.content` chunk + `[DONE]`. The keepalives prevent intermediaries from timing out a long generation.
+
+```sh
+curl -N http://127.0.0.1:11434/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"qwen3.5:9b-q3_k_s",
+    "messages":[{"role":"user","content":"Say hi"}],
+    "stream":true
+  }'
+```
+
+### Tool calls
+
+This is the proof-of-life for opencode-style usage. The model returns a structured `tool_calls[0]`, not a JSON string in `content`. Test #5 in `tests/api.sh` runs exactly this and asserts the shape.
+
+```sh
+curl -s http://127.0.0.1:11434/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model":"qwen3.5:9b-q3_k_s",
+    "messages":[{"role":"user","content":"Read the file prespec.md and tell me the model name it specifies."}],
+    "tools":[{
+      "type":"function",
+      "function":{
+        "name":"read_file",
+        "description":"Read a file from the working directory.",
+        "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}
+      }
+    }],
+    "tool_choice":"auto",
+    "stream":false
+  }' | python3 -m json.tool
+```
+
+### Bypassing the proxy
+
+`:11435` is loopback-only and skips think-suppression. Use it for `ollama pull` (the proxy mishandles `/api/pull` NDJSON streaming) or to compare proxy-on vs proxy-off behaviour.
+
+```sh
+curl -s http://127.0.0.1:11435/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.5:9b-q3_k_s","messages":[{"role":"user","content":"hi"}],"think":false,"stream":false}'
+```
+
+### Health and inspection
+
+```sh
+curl -s http://127.0.0.1:11434/api/version            # via proxy
+curl -s http://127.0.0.1:11434/api/tags               # registered models
+ollama ps                                              # is the model loaded? what's CONTEXT/SIZE?
+ollama show qwen3.5:9b-q3_k_s --modelfile             # baked-in PARAMETERs
+launchctl list | grep com.user.ollama                 # are the agents up?
+```
+
+### Switching models without re-running install.sh
+
+The model the warmer pins is `MODEL_TAG` at install time. To switch:
+
+```sh
+MODEL_TAG=qwen3.5:9b-opencode ./install.sh   # back to vanilla
+# or
+./setup-gguf.sh UD-IQ2_M                      # register an even smaller quant
+MODEL_TAG=qwen3.5:9b-ud-iq2_m ./install.sh
+```
+
+`install.sh` re-renders the warmer plist with the new tag and re-bootstraps the agent. The proxy and server agents stay loaded across switches.
+
+### Thinking-mode notes
+
+Two facts about Qwen 3.5 thinking that this stack is built around:
+- ollama 0.22's OpenAI-compat layer (`/v1/chat/completions`) silently drops the `think:false` flag — it only works on `/api/chat`. The proxy translates `/v1` to `/api/chat` to dodge this.
+- Qwen 3's `/think` / `/nothink` system-prompt directives are silently ignored on Qwen 3.5. There's no Modelfile `PARAMETER` for thinking either — it's strictly a per-request flag, which is why we need the proxy rather than baking it in.
 
 ## Uninstall
 
 ```sh
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.user.ollama.plist
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.user.ollama-warm.plist
-rm ~/Library/LaunchAgents/com.user.ollama*.plist
+for label in com.user.ollama-warm com.user.ollama-proxy com.user.ollama; do
+  launchctl bootout "gui/$(id -u)/$label" 2>/dev/null
+done
+rm -f ~/Library/LaunchAgents/com.user.ollama*.plist
+ollama rm qwen3.5:9b-opencode 2>/dev/null
+ollama rm qwen3.5:9b-q3_k_s 2>/dev/null
 brew uninstall ollama opencode
 ```
 
@@ -180,7 +293,7 @@ curl -X POST http://localhost:11434/api/generate \
 
 ### Quantization
 
-We use `q4_K_M` — that's what `qwen3.5:9b` ships as. There is no smaller variant on ollama's library (verified 2026-04-29: `ollama pull qwen3.5:9b-q4_K_S` returns "manifest does not exist"). Going below `q4_K_M` would require pulling a GGUF from Hugging Face (out of scope here).
+The vanilla path uses `q4_K_M` — that's what `qwen3.5:9b` ships as on ollama. There is no smaller variant on ollama's library (verified 2026-04-29: `ollama pull qwen3.5:9b-q4_K_S` returns "manifest does not exist"). For smaller quants — needed if you don't have 16 GB — use the **GGUF path** documented at the top of this README; `setup-gguf.sh` pulls from `unsloth/Qwen3.5-9B-GGUF` on Hugging Face (Q3_K_S, Q3_K_M, UD-IQ2_M, etc).
 
 ## Troubleshooting
 

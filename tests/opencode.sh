@@ -6,11 +6,12 @@ set -u
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export OPENCODE_CONFIG="$REPO_ROOT/opencode/opencode.json"
+MODEL="${MODEL:-qwen3.5:9b-opencode}"
 
 cat <<EOF
 launching opencode with:
   OPENCODE_CONFIG=$OPENCODE_CONFIG
-  model=qwen3.5:9b-opencode
+  model=$MODEL
 
 When opencode is ready, the test harness pre-types this prompt:
   > Read prespec.md and tell me the model name it specifies
@@ -21,4 +22,4 @@ tool invocation — that's the end-to-end proof of tool calling.
 EOF
 
 cd "$REPO_ROOT"
-exec opencode -m ollama/qwen3.5:9b-opencode
+exec opencode -m "ollama/$MODEL"
