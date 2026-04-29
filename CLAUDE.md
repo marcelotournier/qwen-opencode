@@ -168,3 +168,97 @@ LAN clients should change `baseURL` to `http://m4mac.local:11434/v1` — documen
 ## Research that produced these decisions
 
 Verified via WebFetch against ollama library, opencode docs, ollama GitHub issues #14745, #14601, #14493, and PR #15022 on 2026-04-28. Sampling params from the official `ollama.com/library/qwen3.5` page. Do not trust assumptions about Qwen models from general training knowledge — verify the model exists, has the size you think, and works in ollama via the library page before recommending.
+
+## Thinking-mode investigation (2026-04-28/29)
+
+Qwen 3.5 has thinking-on by default and there is no way to disable it via `Modelfile PARAMETER` — `PARAMETER think false` is rejected by ollama as `unknown parameter`. The toggle is per-request only.
+
+**What works:**
+- `/api/chat` body: `"think": false` — fast (~0.6 s warm for short answers).
+
+**What does NOT work on ollama 0.22.0** (verified all four spellings against `/v1/chat/completions`, all returned 600-800 thinking tokens):
+- `"chat_template_kwargs": {"enable_thinking": false}`
+- `"extra_body": {"chat_template_kwargs": {"enable_thinking": false}}`
+- top-level `"enable_thinking": false`
+- top-level `"think": false`
+
+Qwen 3's `/think` and `/nothink` system-prompt directives are silently ignored on Qwen 3.5.
+
+**Sampling params** are now Unsloth's recommended *non-thinking-mode* set (`temp 0.7, top_p 0.8, min_p 0`) instead of the ollama-library *thinking-mode* defaults (`temp 1, top_p 0.95`). Reduces verbosity even when thinking is on.
+
+## Fake-streaming proxy (`proxy/ollama_proxy.py`)
+
+stdlib python proxy that fronts ollama:
+- `POST /v1/chat/completions` (streaming and non-streaming): translates to `/api/chat` with `think:false`. For streaming, sends `: keepalive` SSE comments every 1 s while ollama generates, then dumps the full response as a single `delta.content` chunk + finish + `[DONE]`.
+- `POST /api/chat` and `/api/generate`: injects `"think": false` if not specified.
+- Tool-call format conversion in **both directions** (ollama uses parsed-object `arguments`; OpenAI clients send JSON-string `arguments`). Without the inbound translation, opencode trips a 400 on the second turn of any tool call.
+- All other paths: transparent passthrough.
+
+Config:
+- listens `0.0.0.0:11434`
+- forwards to `127.0.0.1:11435` (where ollama needs to be moved)
+- env vars: `OLLAMA_PROXY_LISTEN_HOST/PORT`, `OLLAMA_PROXY_UPSTREAM_HOST/PORT`, `OLLAMA_PROXY_HEARTBEAT_S` (default 1), `OLLAMA_PROXY_VERBOSE=1`
+- python 3.9+ stdlib only (no deps). **Avoid f-strings with backslashed quotes** (3.9 syntax error).
+
+## Benchmark data (2026-04-28, m4mac warm, 32K ctx)
+
+Curl matrix (3 prompts × 3 trials × 3 paths):
+
+| Prompt | /v1 PROXY (nonstream) | /v1 STREAM PROXY | /api/chat DIRECT (think:false) |
+|---|---|---|---|
+| 3-word | 730 ms / 5 tok | 675 ms / 4 tok | 708 ms / 5 tok |
+| 2-sentence | 4438 ms / 55 tok | 4638 ms / 58 tok | 4456 ms / 55 tok |
+| Toolish (~450 tok) | 34.8 s | 27.4 s | 37.6 s |
+
+**Conclusion: proxy adds zero measurable overhead.** All three paths are within sampling noise. Sustained decode is **~13 tok/s** regardless of path or prompt size.
+
+opencode TUI matrix (3 prompts × 3 trials, through proxy, in tmux):
+
+| Prompt | Wall (mean) | Range | opencode self-reports |
+|---|---|---|---|
+| 3-word | 88.3 s | 87.95–89.05 s | 1m 27–28s |
+| 2-sentence | 95.9 s | 95.14–96.27 s | 1m 34–35s |
+| File read tool call | 111.2 s | 109.53–112.54 s | 1m 49–51s |
+
+**Variance ~1% across trials** — extremely consistent.
+
+Pre-proxy (thinking on, baseline) for the 3-word prompt: 252 s. Post-proxy: 88 s. **2.7× speedup for the same UX.**
+
+## Why opencode is still slow even with the proxy
+
+The proxy's overhead is zero, but opencode's behavior caps the achievable speed:
+
+1. **opencode sends ~14k tokens of system prompt + tool defs** every turn. At ~13 tok/s decode after a long prefill, every roundtrip is 60–90 s minimum even with thinking off.
+2. **opencode duplicates every `/v1/chat/completions` request** (visible in proxy logs as pairs with identical timestamps). Likely an AI-SDK preflight + main pattern. Doubles inference cost. Not fixable in a passthrough proxy without dedup logic that risks losing tool-call state.
+3. Tool-using turns make 3+ ollama roundtrips per user prompt, so they compound the per-turn cost.
+
+**Bottom line: this hardware is the ceiling, not the proxy.** Sub-2-minute responses for opencode chat, 2–5 minutes for tool-using turns, with rock-solid consistency.
+
+## Proxy status (as of 2026-04-29)
+
+- ✅ Code committed at `proxy/ollama_proxy.py`
+- ✅ Verified against api.sh (6/6 PASS through proxy)
+- ✅ Verified end-to-end with opencode TUI (real tool call executed)
+- ❌ **NOT yet wired as a LaunchAgent.** ollama is currently bound back to `0.0.0.0:11434` (bypassing the proxy). The proxy was tested in foreground only.
+- ❌ install.sh has not been updated to provision the proxy.
+- ❌ README has no proxy section.
+
+## Next steps for the proxy
+
+If we decide to ship it permanently:
+
+1. Update `launchd/com.user.ollama.plist.template` — `OLLAMA_HOST=127.0.0.1:11435` (LAN reach moves to the proxy).
+2. New `launchd/com.user.ollama-proxy.plist.template` — runs `python3 proxy/ollama_proxy.py`, KeepAlive=true, binds `:11434`.
+3. Update install.sh to install + bootstrap the proxy plist after the server (and before the warmer, so the warmer's `:11434` request goes through the proxy and exercises the translation).
+4. Update warmer's curl to either keep using `/api/generate` (which the proxy also injects `think:false` on) or call the proxy at `:11434` — either works.
+5. Add a "Proxy" section to README + CLAUDE.md describing what it does and the env-var knobs.
+6. Add proxy-specific tests to api.sh (e.g., assert that `/v1/chat/completions` returns within 30 s for a short prompt — would fail without the proxy).
+
+If we decide NOT to ship it: delete `proxy/` and remove this section.
+
+## Open issues / known limitations
+
+- **opencode duplicate requests**: documented above. ~2× cost, not fixable in proxy.
+- **opencode `--format json` buffers until exit**: do not use for headless benchmarking; the file stays 0 bytes for many minutes. Use the tmux + send-keys + capture-pane pattern from `/tmp/oc_tmux_bench.sh` (lost — recreate if needed).
+- **macOS `log stream` does not show ollama output** because the LaunchAgent uses `StandardOutPath`/`StandardErrorPath` (file redirection, not `os_log`). `test.sh` uses `tail -F` on the log files instead.
+- **`launchctl bootstrap` returns Bootstrap: 5 EIO** if the agent is already loaded. install.sh now only bootstraps when the plist content actually changed; otherwise it just verifies the agent is loaded.
