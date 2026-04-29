@@ -7,7 +7,7 @@ Always-on local ollama server hosting `qwen3.5:9b-opencode` on `m4mac.local`, re
 - `qwen3.5:9b` (6.6 GB, 256K-capable) re-tagged as `qwen3.5:9b-opencode` with sampling params baked in via `Modelfile`.
 - ollama bound to `0.0.0.0:11434`, so any device on the LAN can call it via `m4mac.local:11434`.
 - Two LaunchAgents: one keeps the ollama server running across reboot/sleep/crash, the other pre-warms the model into memory at boot so the first request doesn't pay a 10–30 s cold start.
-- Capped `num_ctx=32768` and `OLLAMA_KEEP_ALIVE=-1` so the model stays resident in ~7–9 GB without thrashing macOS swap on the 16 GB M4.
+- Capped `num_ctx=16384` and `OLLAMA_KEEP_ALIVE=-1` so the model stays resident in ~9 GB without thrashing macOS swap on the 16 GB M4.
 - An `opencode/opencode.json` that points opencode at the local model out of the box.
 - A 3-pane tmux test harness (`./test.sh`) that streams logs, runs 6 API smoke checks, and drops into opencode for an interactive tool-call test.
 
@@ -145,13 +145,42 @@ The M4 has 16 GB unified memory. The server holds the model resident, so we cap 
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| `num_ctx` | `32768` | opencode-recommended floor for reliable tool calls; larger contexts blow the KV cache |
+| `num_ctx` | `16384` | opencode-recommended floor for reliable tool calls. See trade-offs below |
 | `OLLAMA_KEEP_ALIVE` | `-1` | never unload — defeats ollama's memory-saving auto-eviction |
 | `OLLAMA_MAX_LOADED_MODELS` | `1` | predictable footprint |
 | `OLLAMA_NUM_PARALLEL` | `1` | predictable footprint |
 | `OLLAMA_FLASH_ATTENTION` | `1` | perf gain on Apple Silicon |
 
-Measured resident with the model fully loaded and 32K context allocated: **~9.7 GB** (Q4_K_M, all in unified memory). That leaves roughly 6 GB for macOS and other apps on the 16 GB M4 — workable, but not a lot of headroom. If you find yourself swapping, drop `num_ctx` to `16384` in `Modelfile` and rebuild.
+### Context window trade-offs
+
+`num_ctx` directly controls KV cache size — the biggest non-weights memory cost. For `qwen3.5:9b` Q4_K_M with FlashAttention on Metal:
+
+| `num_ctx` | KV cache | Total resident | Free RAM after model | Verdict |
+|---|---|---|---|---|
+| `8192` | ~0.85 GiB | ~7.6 GiB | ~7.6 GB | **Avoid** — below opencode's tool-calling floor |
+| `16384` | ~1.7 GiB | **~8.4 GiB** | **~6.5 GB** | **Default.** Floor for reliable opencode tool calls |
+| `32768` | ~2.2 GiB | ~9.1 GiB | ~5.8 GB | OK if you're doing long-context work and quit other apps |
+| `65536+` | 4+ GiB | 11+ GiB | <4 GB | **Don't.** Forces severe swap on 16 GB |
+
+**Decision rule for the 16 GB M4: pick `16384` or `32768`. Never higher.** Both numbers fit; anything bigger pushes the system into swap under normal browser/app load.
+
+To switch to 32K (more headroom for opencode multi-file work, less headroom for everything else): edit `Modelfile`, set `PARAMETER num_ctx 32768`, then:
+
+```sh
+ollama create qwen3.5:9b-opencode -f Modelfile
+# force-evict the old resident copy:
+curl -X POST http://localhost:11434/api/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.5:9b-opencode","keep_alive":0}'
+# warm the new one (think:false to avoid 30s thinking on the warm request):
+curl -X POST http://localhost:11434/api/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.5:9b-opencode","prompt":"hi","think":false,"stream":false,"keep_alive":-1}'
+```
+
+### Quantization
+
+We use `q4_K_M` — that's what `qwen3.5:9b` ships as. There is no smaller variant on ollama's library (verified 2026-04-29: `ollama pull qwen3.5:9b-q4_K_S` returns "manifest does not exist"). Going below `q4_K_M` would require pulling a GGUF from Hugging Face (out of scope here).
 
 ## Troubleshooting
 

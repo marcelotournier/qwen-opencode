@@ -14,11 +14,32 @@ Always-on local ollama server hosting `qwen3.5:9b` for opencode and other LAN cl
 The "always loaded" requirement is in tension with 16 GB total RAM. Resolution:
 
 - `OLLAMA_KEEP_ALIVE=-1` — never unload the model.
-- `num_ctx=32768` — capped at 32K, **not** the model's max 256K. Larger contexts blow up KV cache and trigger swap.
+- `num_ctx=16384` — current setting. See "Context window tradeoffs" below for why.
 - `OLLAMA_MAX_LOADED_MODELS=1`, `OLLAMA_NUM_PARALLEL=1` — keep memory footprint predictable.
 - `OLLAMA_FLASH_ATTENTION=1` — perf gain on Apple Silicon.
 
-Total resident with model loaded: ~7–9 GB. Leaves 7+ GB for macOS and the user's other apps.
+Measured resident with `num_ctx=16384`: **9.07 GB unified memory**, runner reports total of 8.4 GiB (5.6 GiB Metal weights + 1.7 GiB KV + 0.5 GiB CPU weights + ~0.6 GiB compute graph). Leaves ~6.5 GB for macOS and other apps. With `num_ctx=32768`: 9.74 GB resident, ~5.8 GB free, *and* the system was sitting at 3 GB swap used under normal browser/app load.
+
+## Context window tradeoffs
+
+`num_ctx` directly controls KV cache size, which is the biggest non-weights memory cost. Approximate values for `qwen3.5:9b` Q4_K_M with FlashAttention on Metal:
+
+| `num_ctx` | KV cache | Runner total | Free RAM after model | Recommendation |
+|---|---|---|---|---|
+| 8192 | ~0.85 GiB | ~7.55 GiB | ~7.6 GB | Below opencode-recommended floor; tool calls degrade |
+| 16384 | ~1.7 GiB | ~8.4 GiB | ~6.5 GB | **Current.** Floor for reliable opencode tool calling |
+| 32768 | ~2.2 GiB | ~9.1 GiB | ~5.8 GB | Better for long files / multi-step refactors. Pushes 16 GB M4 into swap |
+| 65536+ | 4+ GiB | 11+ GiB | <4 GB | Don't on 16 GB. Forces severe swap |
+
+**Decision rule for the 16 GB M4: always pick 16384 or 32768. Never go above 32768 — KV cache scales linearly with context and the math stops working.** 8192 is below opencode's documented floor for reliable tool-calling and we've never tested it; treat as risky.
+
+When to switch to 32768: if you're doing genuinely long single-context work (reading a 5+ file refactor in one go, or processing a long document) AND you can quit other apps to free 1+ GB. Re-render the Modelfile, `ollama create`, force-evict the resident copy via `keep_alive:0`, and re-warm.
+
+## Quantization investigation (2026-04-29)
+
+Investigated `qwen3.5:9b-q4_K_S` (smaller than current `q4_K_M`, ~6 GB instead of 6.6 GB). **Not available on ollama's library** — verified via `ollama pull qwen3.5:9b-q4_K_S` returning `Error: pull model manifest: file does not exist`. Library only ships `q4_K_M` (smallest), `q8_0`, `bf16`, `mlx-bf16`, `nvfp4`, `mxfp8` — all the alternatives are *bigger*.
+
+Going below `q4_K_M` requires pulling a GGUF from Hugging Face (e.g. unsloth's q3 or q2 variants), which counts as switching the model — out of scope per project constraints. Staying on `q4_K_M`.
 
 ## Persistence
 
@@ -262,3 +283,4 @@ If we decide NOT to ship it: delete `proxy/` and remove this section.
 - **opencode `--format json` buffers until exit**: do not use for headless benchmarking; the file stays 0 bytes for many minutes. Use the tmux + send-keys + capture-pane pattern from `/tmp/oc_tmux_bench.sh` (lost — recreate if needed).
 - **macOS `log stream` does not show ollama output** because the LaunchAgent uses `StandardOutPath`/`StandardErrorPath` (file redirection, not `os_log`). `test.sh` uses `tail -F` on the log files instead.
 - **`launchctl bootstrap` returns Bootstrap: 5 EIO** if the agent is already loaded. install.sh now only bootstraps when the plist content actually changed; otherwise it just verifies the agent is loaded.
+- **Proxy mangles `/api/pull` responses**: confirmed 2026-04-29 with `ollama pull qwen3.5:9b-q4_K_S` failing through the proxy with `malformed HTTP response "0"`. The pull endpoint streams NDJSON (newline-delimited JSON), not SSE — our chunked-passthrough breaks the framing somehow. **Workaround: pull through the upstream directly with `OLLAMA_HOST=127.0.0.1:11435 ollama pull <tag>`.** Fix would be either (a) detect `/api/pull` and `/api/push` and stream raw without re-chunking, or (b) buffer the entire response. (a) is correct, (b) defeats progress reporting.
